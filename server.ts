@@ -5,7 +5,7 @@ import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 import express, { NextFunction, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
-import mongoose, { Document, Schema } from 'mongoose';
+import mongoose, { HydratedDocument, Model, Schema } from 'mongoose';
 import { createServer as createViteServer } from 'vite';
 
 dotenv.config();
@@ -42,9 +42,11 @@ interface InventoryInput {
   notes: string;
 }
 
-export interface IInventoryItem extends Document, InventoryInput {
+export interface IInventoryItem extends InventoryInput {
   lastUpdated: Date;
 }
+
+type InventoryDocument = HydratedDocument<IInventoryItem>;
 
 interface MemoryItem extends InventoryInput {
   _id: string;
@@ -91,8 +93,13 @@ const AuditSchema = new Schema<AuditInput>(
   { versionKey: false }
 );
 
-const InventoryModel = mongoose.models.InventoryItem || mongoose.model<IInventoryItem>('InventoryItem', ItemSchema);
-const AuditModel = mongoose.models.InventoryAudit || mongoose.model('InventoryAudit', AuditSchema);
+const InventoryModel: Model<IInventoryItem> =
+  (mongoose.models.InventoryItem as Model<IInventoryItem> | undefined) ||
+  mongoose.model<IInventoryItem>('InventoryItem', ItemSchema);
+
+const AuditModel: Model<AuditInput> =
+  (mongoose.models.InventoryAudit as Model<AuditInput> | undefined) ||
+  mongoose.model<AuditInput>('InventoryAudit', AuditSchema);
 
 let isMongoConnected = false;
 let cachedConnection: Promise<void> | null = null;
@@ -353,7 +360,7 @@ app.patch('/api/inventory/:id/stock', requireAdminAuth, requireDatabase, async (
     if (hasDelta === hasQuantity) return res.status(400).json({ error: 'Provide either a numeric delta or a numeric quantity.' });
     const reason = text(req.body?.reason, 'Reason', 300, false);
 
-    let item: any;
+    let item: InventoryDocument | MemoryItem | null | undefined;
     if (isMongoConnected) {
       if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: 'Invalid inventory item ID.' });
       item = await InventoryModel.findById(req.params.id);
@@ -367,7 +374,9 @@ app.patch('/api/inventory/:id/stock', requireAdminAuth, requireDatabase, async (
     numberValue(nextQuantity, 'Resulting quantity', true);
     item.quantity = nextQuantity;
     item.lastUpdated = new Date();
-    if (isMongoConnected) await item.save();
+    if ('save' in item && typeof item.save === 'function') {
+      await item.save();
+    }
 
     await writeAudit({ itemId: String(item._id), itemName: item.itemName, action: 'stock-adjustment', previousQuantity, newQuantity: nextQuantity, reason, performedBy: req.user!.username, createdAt: new Date() });
     res.json(item);
